@@ -1,0 +1,1159 @@
+---
+title: "Academy Award Win Analysis"
+author: "Andrew Norman"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    keep_tex: true
+  date: "2025-05-02"
+  html_document:
+    df_print: paged
+---
+
+```{r, setup, warning = FALSE, message = FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      warning = FALSE,
+                      message = FALSE)
+library(tidyverse)
+library(stringr)
+library(broom)
+library(patchwork)
+library(scales)
+library(ggrepel)
+library(skimr)
+library(tibble)
+library(knitr)
+library(caret)
+library(modelsummary)
+library(pROC)
+```
+
+# 1. First import the data after cleaning it in python.
+
+(All data cleansing cells have been commented out since after completing the data frame it was saved and only the final data frame was called. The Python file and original base data frames are included, but takes a while to run and it will not run from start to finish without manually adding all of the films IMDB ids. We have included the file that is the step before adding the IDs and the step after adding the IDs, but there was no automation in that process. During this first step all that was done was changing the names of categories so that they are consistent throughout the years since they have changed over time.)
+
+```{r, import first df}
+#oscar_data <- read.csv("~/Downloads/EC 422/Final_Project/oscar_data1.csv")
+```
+
+# 2. Convert str winner var to int win var and drop winner and winner2.
+
+The winner variable to be an integer as opposed to a string so it can be used for analysis and get summary statistics on it if necessary and used as a factor variable for plots.
+
+```{r, convert winner var}
+#filtered_oscar_data <- oscar_data %>%
+  #filter(year_film >= 1970) %>%
+  #mutate(winner2 = str_to_upper(winner)) %>%
+  #mutate(win = 
+           #ifelse(winner2 == TRUE, 1, 0)) %>%
+  #select(-X, -winner, -winner2)
+```
+
+# 3. Export as .csv and add in manual excel values, then import back into python and use Cinemagoer to append runtime, genre, box_office, and budget.
+
+This is where most of the work the python file did is. After all of the individual IDs were added to the file, an IMDB .tsv file called `title.basics.tsv` was used to get runtime and genre information and the `Cinemagoer()` package was used to retrieve box office and budget information.
+
+```{r, export first .csv}
+#write.csv(filtered_oscar_data, "oscar_data2.csv", row.names = TRUE)
+```
+
+# 4. Import inf_mult.csv to adjust values for inflation if necessary.
+
+```{r, import inflation .csv}
+#inf_mult <- read.csv(("~/Downloads/EC 422/Final_Project/data/inflation_multiplier.csv"))
+#inf_mult <- inf_mult %>%
+  #rename(year = Year)
+```
+
+Created an inflation multiplier data frame for use if the box office and budget values were not adjusted for inflation (it turns out that they already were so it was not used in the final data frame).
+
+# 5. Reimport Oscar dataframe, merge with inf_mult, then export to a new .csv and reimport to avoid redoing all these steps.
+
+This was the cell where the final data frame was created. After all the automated work from the packages in python and the manual work of adding everything to the excel file, the data frames were merged and rewrote into a new file and then only that file was used past this point.
+
+```{r, reimport csv, merge, export, then reimport final df}
+#oscar_data3 <- read.csv("~/Downloads/EC 422/Final_Project/data/oscar_data3.csv)
+#oscar_data3 <- oscar_data3 %>%
+  #rename(year = year_film,
+         #winner = win) %>%
+  #select(-X)
+
+#left_join(oscar_data3, inf_mult, by = "year")
+
+#write.csv(oscar_data3, "final_oscar_data.csv", row_names = TRUE)
+
+final_od <- read.csv("~/Downloads/EC 422/Final_Project/data/final_oscar_data.csv")
+```
+
+# 6. Remove extra characters and convert box_office and budget to integers and drop the X column again.
+
+```{r, convert vars to integers and remove text}
+final_od <- final_od %>%
+  mutate(box_office = gsub("\\$", "", box_office),
+         box_office = trimws(box_office),
+         box_office = gsub(",", "", box_office),
+         budget = gsub("\\$", "", budget),
+         budget = gsub(",", "", budget),
+         budget = gsub("\\(estimated\\)", "", budget),
+         budget = trimws(budget)) %>%
+  select(-X)
+
+final_od$box_office <- ifelse(nchar(trimws(final_od$box_office)) == 0, NA, final_od$box_of)
+final_od$budget <- ifelse(nchar(trimws(final_od$budget)) == 0, NA, final_od$budget)
+
+final_od$box_office <- as.integer(final_od$box_office)
+final_od$budget <- as.integer(final_od$budget)
+
+head(final_od)
+```
+
+# 7. View the structure of the data and skim it for general information.
+
+```{r, view data}
+str(final_od)
+skim(final_od)
+```
+
+# 8. Separate genres into 3 different variables.
+
+```{r, separate genre}
+final_od <- final_od %>%
+  separate(genres, into = c("genre1", "genre2", "genre3"), sep = ",", fill = "right")
+```
+
+# 9. Create dummies for award categories and genres by creating new dataframes, merge them, and then drop repeating categories that appear after the merges.
+
+```{r, create category and genre dummies, dpi = 600}
+final_od <- final_od %>%
+  mutate(best_pic_win = ifelse(category == "Best Picture", winner, 0)) %>% 
+  mutate(best_actor_win = ifelse(category == "Best Actor", winner, 0)) %>%
+  mutate(best_actress_win = ifelse(category == "Best Actress", winner, 0)) %>% 
+  mutate(best_dir_win = ifelse(category == "Best Director", winner, 0))
+
+genre_dummies <- final_od %>%
+  pivot_longer(cols = c(genre1, genre2, genre3), names_to = "genre_col", values_to = "genre", values_drop_na = TRUE) %>%
+  mutate(value = 1) %>%
+  pivot_wider(names_from = genre, values_from = value, values_fill = 0)
+
+od <- final_od %>%
+  left_join(genre_dummies, by = "ids", relationship = "many-to-many") %>% select(-genre_col, -ends_with('.y')) %>%
+  rename_with(~ gsub("\\.x$", "", .), ends_with(".x")) %>%
+  rename(sci_fi = "Sci-Fi")
+```
+
+# 10. Histogram comparing the density distribution of runtime of nominees and winners by category.
+
+```{r, runtime histograms}
+runtime_pic_hist <- ggplot(od[od$category == "Best Picture", ],
+       aes(x = runtime, 
+           fill = as.factor(best_pic_win))) +
+  geom_histogram(binwidth = 10, color = "black",
+                 aes(y = ..density..),
+                 position = "dodge") +
+  labs(x = "",
+       y = "Density",
+       title = "Best Picture", fill = "Winner") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = .5),
+      legend.position = "none")
+
+runtime_dir_hist <- ggplot(od[od$category == "Best Director", ],
+       aes(x = runtime, 
+           fill = as.factor(best_dir_win))) +
+  geom_histogram(binwidth = 10, color = "black",
+                 aes(y = ..density..),
+                 position = "dodge") +
+  labs(x = "",
+       y = "",
+       title = "Best Director", fill = "Winner") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = .5),
+      legend.position = "none")
+
+runtime_actor_hist <- ggplot(od[od$category == "Best Actor", ],
+       aes(x = runtime, 
+           fill = as.factor(best_actor_win))) +
+  geom_histogram(binwidth = 10, color = "black",
+                 aes(y = ..density..),
+                 position = "dodge") +
+  labs(x = "Runtime (in minutes)",
+       y = "Density",
+       title = "Best Actor", fill = "Winner") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = .5),
+      legend.position = "bottom")
+
+runtime_actress_hist <- ggplot(od[od$category == "Best Actress", ],
+       aes(x = runtime, 
+           fill = as.factor(best_actress_win))) +
+  geom_histogram(binwidth = 10, color = "black",
+                 aes(y = ..density..),
+                 position = "dodge") +
+  labs(x = "Runtime (in minutes)",
+       y = "",
+       title = "Best Actress", fill = "Winner") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = .5),
+      legend.position = "none")
+
+(runtime_pic_hist | runtime_dir_hist)/
+(runtime_actor_hist | runtime_actress_hist) +
+  plot_annotation(title = "Win Density by Runtime by Award Category",
+                  theme = theme(plot.title = element_text(hjust = .5)))
+```
+
+Looking at the histograms, the distribution of winners roughly mirrors that of the nominees across categories. All categories are right-skewed with a center around 120–150 minutes. In the Picture and Director categories, a noticeable spike occurs beyond the 190–minute and 3–hour marks, potentially reflecting the additional time directors have to showcase creative and technical skills. The Best Actor category exhibits a long tail for both winners and nominees, suggesting that extended runtimes may provide actors with more opportunities to demonstrate range and depth. In contrast, Best Actress stands out as an outlier, with a sparse tail beyond 160 minutes and no winners after this point. This may reflect broader industry trends, where films led by female actors tend to have shorter runtimes overall rather than a lack of nominations for longer features.
+
+# 11. Histogram of density distribution of total_noms by win.
+
+```{r, total noms histograms, dpi = 600}
+total_noms_pic_hist <- ggplot(od[od$category == "Best Picture", ],
+        aes(x = total_noms,
+            fill = as.factor(best_pic_win))) +
+  geom_histogram(bins = length(unique(od$total_noms)), 
+                 color = "black", 
+                 breaks = 1:15,
+                 aes(y = ..density..),
+                 position = "dodge") + 
+  theme_bw() + 
+  theme(legend.position = "none",
+plot.title = element_text(hjust = .5)) + 
+  labs(x = "",
+       y = "Density",
+       title = "Best Picture")
+
+total_noms_dir_hist <- ggplot(od[od$category == "Best Director", ],
+        aes(x = total_noms,
+            fill = as.factor(best_dir_win))) +
+  geom_histogram(bins = length(unique(od$total_noms)), 
+                 color = "black", 
+                 breaks = 1:15,
+                 aes(y = ..density..),
+                 position = "dodge") + 
+  theme_bw() + 
+  theme(legend.position = "none",
+plot.title = element_text(hjust = .5)) + 
+  labs(x = "",
+       y = "",
+       title = "Best Director")
+
+total_noms_actor_hist <- ggplot(od[od$category == "Best Actor", ],
+        aes(x = total_noms,
+            fill = as.factor(best_actor_win))) +
+  geom_histogram(bins = length(unique(od$total_noms)), 
+                 color = "black", 
+                 breaks = 1:15,
+                 aes(y = ..density..),
+                 position = "dodge") + 
+  theme_bw() + 
+  theme(legend.position = "bottom",
+plot.title = element_text(hjust = .5)) + 
+  labs(x = "Total Nominations",
+       y = "Density",
+       title = "Best Actor",
+       fill = "Winner")
+
+total_noms_actress_hist <- ggplot(od[od$category == "Best Actress", ],
+        aes(x = total_noms,
+            fill = as.factor(best_actress_win))) +
+  geom_histogram(bins = length(unique(od$total_noms)), 
+                 color = "black", 
+                 breaks = 1:15,
+                 aes(y = ..density..),
+                 position = "dodge") + 
+  theme_bw() + 
+  theme(legend.position = "none",
+plot.title = element_text(hjust = .5)) + 
+  labs(x = "Total Nominations",
+       y = "",
+       title = "Best Actress")
+
+(total_noms_pic_hist | total_noms_dir_hist) / 
+  (total_noms_actor_hist | total_noms_actress_hist) +
+  plot_annotation(title = "Win Density by Total Nominations by Award Category",
+                  theme = theme(plot.title = element_text(hjust = .5)))
+```
+
+The histograms of total nominations versus wins indicate that films with fewer than four nominations are unlikely to secure awards in most categories. In the Picture and Director categories, additional nominations generally correlate with higher chances of winning, likely reflecting strong performance across multiple dimensions of filmmaking. In the Best Actor category, films with 4–8 nominations show relatively stable odds of producing a winner, with a notable increase only at the 11-nomination mark. By contrast, the Best Actress category demonstrates a different pattern, as actresses appear almost equally likely to win regardless of the total number of nominations a film receives.
+
+# 12. Create a smaller genre dataframe to create a bar chart of genres and frequency of win.
+
+```{r, create genre df and genre histogram}
+genre_table1 <- od %>% 
+  select(genre1, winner, year) %>% 
+  rename(genre = genre1) 
+
+genre_table2 <- od %>% 
+  select(genre2, winner, year) %>% 
+  rename(genre = genre2) 
+
+genre_table3 <- od %>% 
+  select(genre3, winner, year) %>% 
+  rename(genre = genre3)
+
+genre_master_table <- bind_rows(genre_table1, genre_table2, genre_table3)
+
+genre_master_table <- genre_master_table %>% 
+  filter(!is.na(genre))
+
+genre_master_table <- genre_master_table %>% 
+  mutate(genre = fct_infreq(genre))
+
+ggplot(genre_master_table,
+       aes(x = genre, 
+           fill = factor(winner))) + 
+  geom_bar(position = "dodge", 
+           color = "black") +
+  labs(x = "Genre",
+       y = "Frequency",
+       title = "Nominations and Wins by Genre",
+       fill = "Winner") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = .5),
+        legend.position = "bottom") +
+  coord_flip()
+```
+
+It appears that there is no genre more likely to win than the others purely because of the genre as the proportion of wins looks identical to nominations for most genres. There are some genres with no wins like family, horror, and animation, however it may just be due to incorrect applications of the genres. Most animation is not really a genre, it is a medium of filmmaking so any animated films that won may not have animation as a genre. Also, there is a category for Best Animated Film which was left out of this analysis, so by including that results may change. Horror movies have been traditionally overlooked by the Academy over the years so that is not a surprise. As for the family genre, it makes sense as family movies are usually wide appealing movies that also have to be inclusive and interesting for children so they may not do well critically being voted on by adults.
+
+# 13. Create a scatterplot for average yearly box_office vs proportion of wins.
+
+```{r, box office scatterplot, dpi = 600}
+ year_box_summary <- od %>%
+  filter(!is.na(box_office), !is.na(winner), !is.na(year)) %>%
+group_by(year) %>% 
+  summarise(avg_box_office = mean(box_office),
+            win_rate = mean(winner),
+            count = n(),
+            .groups = "drop")
+
+
+ggplot(year_box_summary,
+       aes(x = avg_box_office,
+           y = win_rate)) +
+  geom_point(color = "red",
+             alpha = 0.6) +
+  ggrepel::geom_text_repel(
+    aes(label = year),
+    size = 3,
+    color = "black", 
+    max.overlaps = 20, 
+    box.padding = 0.4, 
+    point.padding = 0.2, 
+    force = 2) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  scale_x_continuous(labels = dollar_format(scale = 1e-6, suffix = "M")) +
+  labs(
+    x = "Average Box Office (USD)",
+    y = "Proportion of Wins",
+    title = "Yearly Average Box Office vs. Win Rate") +
+  theme_bw() + theme(legend.position = "bottom",
+                     plot.title = element_text(hjust = .5))
+```
+
+An analysis of yearly average box office returns versus the proportion of nominated films that win reveals no consistent relationship between higher spending and award success. Most data points cluster around $90–150 million in average box office and a 20–30% win rate. Variation across years is partly explained by changes in the number of Best Picture nominees, as the Academy has adjusted the slate to test for viewership impact. For example, in 2019 the larger nominee pool included more blockbusters with higher box office returns, which raised the overall average but reduced the win rate due to increased competition.
+
+# 14. Create a scatterplot for average yearly budget vs proportion of wins.
+
+```{r, budget scatterplot, dpi = 600}
+year_bud_summary <- od %>%
+  filter(!is.na(budget),
+         !is.na(winner),
+         !is.na(year)) %>%
+  group_by(year) %>%
+  summarise(
+    avg_budget = mean(budget),
+    win_rate = mean(winner),
+    count = n(),
+    .groups = "drop")
+
+ggplot(year_bud_summary,
+       aes(x = avg_budget,
+           y = win_rate)) +
+  geom_point(#
+             color = "red",
+             alpha = 0.6) +
+  ggrepel::geom_text_repel(
+    aes(label = year),
+    size = 3,
+    color = "black",
+    max.overlaps = 20,
+    box.padding = 0.4,
+    point.padding = 0.2,
+    force = 2) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  scale_x_continuous(labels = dollar_format(scale = 1e-6, suffix = "M")) +
+  labs(
+    x = "Average Budget (USD)",
+    y = "Proportion of Wins",
+    title = "Yearly Average Budget vs. Win Rate",
+    size = "Movies that Year") +
+  theme_bw() + 
+  theme(legend.position = "bottom",
+        plot.title = element_text(hjust = .5))
+```
+
+Shifting to looking at average yearly budget vs win proportions there is a general trend of increasing movie budgets between decades. This can be accounted for based on the fact that now more than ever films are seen as investments and less so art. Studios and distributors want to see bigger returns on movies and make more money and to do that you may have to spend more money to get better actors, directors, set designers, and production crew members to get the attractiveness that is required to draw in the most money possible.
+
+# 15. Find the predicted win probabilities for box_office for each of the four award categories and create scatterplots comparing them.
+
+```{r, box_office logit models and plots, dpi = 600}
+box_office_df <- od %>%
+  filter(!is.na(box_office))
+
+box_pic_od <- box_office_df %>%
+  filter(category == "Best Picture")
+
+box_pic_model <- glm(best_pic_win ~ log(box_office),
+                     data = box_pic_od,
+                     family = "binomial")
+
+box_pic_od <- box_pic_od %>%
+  mutate(
+    pred_box_pic = predict(box_pic_model, type = "response")
+  )
+
+box_v_pic <- ggplot(box_pic_od,
+                    aes(
+                      x = log(box_office),
+                      y = pred_box_pic
+                    )) +
+  geom_point() +
+  geom_smooth(method = "loess", se = FALSE, color = "red") +
+  labs(
+    x = "",
+    y = "Probability of Win",
+    title = "Best Picture") + 
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = .5))
+
+box_dir_od <- box_office_df %>%
+  filter(category == "Best Director")
+
+box_dir_model <- glm(best_dir_win ~ log(box_office),
+                     data = box_dir_od,
+                     family = "binomial")
+
+box_dir_od <- box_dir_od %>%
+  mutate(
+    pred_box_dir = predict(box_dir_model, type = "response")
+  )
+
+box_v_dir <- ggplot(box_dir_od,
+                    aes(
+                      x = log(box_office),
+                      y = pred_box_dir
+                    )) +
+  geom_point() +
+  geom_smooth(method = "loess", se = FALSE, color = "red") +
+  labs(
+    x = "",
+    y = "Probability of Win",
+    title = "Best Director") + 
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = .5))
+
+box_actor_od <- box_office_df %>%
+  filter(category == "Best Actor")
+
+box_actor_model <- glm(best_actor_win ~ log(box_office),
+                     data = box_actor_od,
+                     family = "binomial")
+
+box_actor_od <- box_actor_od %>%
+  mutate(
+    pred_box_actor = predict(box_actor_model, type = "response")
+  )
+
+box_v_actor <- ggplot(box_actor_od,
+                    aes(
+                      x = log(box_office),
+                      y = pred_box_actor
+                    )) +
+  geom_point() +
+  geom_smooth(method = "loess", se = FALSE, color = "red") +
+  labs(
+    x = "log(box_office)",
+    y = "Probability of Win",
+    title = "Best Actor") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = .5))
+
+box_actress_od <- box_office_df %>%
+  filter(category == "Best Actress")
+
+box_actress_model <- glm(best_actress_win ~ log(box_office),
+                     data = box_actress_od,
+                     family = "binomial")
+
+box_actress_od <- box_actress_od %>%
+  mutate(
+    pred_box_actress = predict(box_actress_model, type = "response")
+  )
+
+box_v_actress <- ggplot(box_actress_od,
+                    aes(
+                      x = log(box_office),
+                      y = pred_box_actress
+                    )) +
+  geom_point() +
+  geom_smooth(method = "loess", se = FALSE, color = "red") +
+  labs(
+    x = "log(box_office)",
+    y = "Probability of Win",
+    title = "Best Actress") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = .5))
+
+(box_v_pic | box_v_dir) /
+(box_v_actor | box_v_actress) +
+  plot_annotation(title = "Predicted Pr(winning)",
+                  theme = theme(plot.title = element_text(hjust = .5)))
+```
+
+Using box office as the sole predictor in a model estimating the probability of winning awards shows a positive relationship between box office performance and all award categories. There are nuances to this outcome. This trend is understandable, as a movie attracting significant public attention is more likely to possess qualities that make it a strong candidate for awards. However, this relationship is not always straightforward, since blockbuster movies often perform best at the box office but frequently win few awards, given that they are generally not considered as artistically distinguished as other films.
+
+# 16. Do the same for budget.
+
+```{r, budget logit models and plots, dpi = 600}
+budget_df <- od %>%
+  filter(!is.na(budget))
+
+bud_pic_od <- budget_df %>%
+  filter(category == "Best Picture")
+
+bud_pic_model <- glm(best_pic_win ~ log(budget),
+                     data = bud_pic_od,
+                     family = "binomial")
+
+bud_pic_od <- bud_pic_od %>%
+  mutate(
+    pred_bud_pic = predict(bud_pic_model, type = "response")
+  )
+
+bud_v_pic <- ggplot(bud_pic_od,
+                    aes(
+                      x = log(budget),
+                      y = pred_bud_pic
+                    )) +
+  geom_point() +
+  geom_smooth(method = "loess", se = FALSE, color = "red") +
+  labs(
+    x = "",
+    y = "Probability of Win",
+    title = "Best Picture") + 
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = .5))
+
+bud_dir_od <- budget_df %>%
+  filter(category == "Best Director")
+
+bud_dir_model <- glm(best_dir_win ~ log(budget),
+                     data = bud_dir_od,
+                     family = "binomial")
+
+bud_dir_od <- bud_dir_od %>%
+  mutate(
+    pred_bud_dir = predict(bud_dir_model, type = "response")
+  )
+
+bud_v_dir <- ggplot(bud_dir_od,
+                    aes(
+                      x = log(budget),
+                      y = pred_bud_dir
+                    )) +
+  geom_point() +
+  geom_smooth(method = "loess", se = FALSE, color = "red") +
+  labs(
+    x = "",
+    y = "Probability of Win",
+    title = "Best Director") +
+  theme_minimal() + 
+  theme(plot.title = element_text(hjust = .5))
+
+bud_actor_od <- budget_df %>%
+  filter(category == "Best Actor")
+
+bud_actor_model <- glm(best_actor_win ~ log(budget),
+                     data = bud_actor_od,
+                     family = "binomial")
+
+bud_actor_od <- bud_actor_od %>%
+  mutate(
+    pred_bud_actor = predict(bud_actor_model, type = "response")
+  )
+
+bud_v_actor <- ggplot(bud_actor_od,
+                    aes(
+                      x = log(budget),
+                      y = pred_bud_actor
+                    )) +
+  geom_point() +
+  geom_smooth(method = "loess", se = FALSE, color = "red") +
+  labs(
+    x = "log(budget)",
+    y = "Probability of Win",
+    title = "Best Actor") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = .5))
+
+bud_actress_od <- budget_df %>%
+  filter(category == "Best Actress")
+
+bud_actress_model <- glm(best_actress_win ~ log(budget),
+                     data = bud_actress_od,
+                     family = "binomial")
+
+bud_actress_od <- bud_actress_od %>%
+  mutate(
+    pred_bud_actress = predict(bud_actress_model, type = "response")
+  )
+
+bud_v_actress <- ggplot(bud_actress_od,
+                    aes(
+                      x = log(budget),
+                      y = pred_bud_actress
+                    )) +
+  geom_point() +
+  geom_smooth(method = "loess", se = FALSE, color = "red") +
+  labs(
+    x = "log(budget)",
+    y = "",
+    title = "Best Actress") +
+  theme_minimal() + 
+  theme(plot.title = element_text(hjust = .5))
+
+(bud_v_pic | bud_v_dir) /
+(bud_v_actor | bud_v_actress) +
+  plot_annotation(title = "Predicted Pr(winning)",
+                  theme = theme(plot.title = element_text(hjust = .5)))
+```
+
+For the model including only budget, some interesting patterns emerge. First, Best Picture and Best Actress are less likely to win as the budget increases. This might be expected for all categories, since higher-budget films are more likely to be blockbusters, which often receive less critical acclaim. However, Best Director and Best Actor are more likely to win as the budget rises. A higher budget may allow the director greater creative freedom in shaping the film. For Best Actor, a larger budget could enable the hiring of more accomplished actors who are more likely to win awards.
+
+# 17. Create our logistic regression models since our outcome variable is a probability between 0 and 1.
+
+```{r, logistic regression models for each win dummy}
+monetary_influence_pic <- glm(best_pic_win ~ log(box_office) + log(budget),
+                              data = od[od$category == "Best Picture", ], family = "binomial")
+
+monetary_influence_dir <- glm(best_dir_win ~ log(box_office) + log(budget),
+                              data = od[od$category == "Best Director", ], family = "binomial")
+
+monetary_influence_actor <- glm(best_actor_win ~ log(box_office) + log(budget),
+                                data = od[od$category == "Best Actor", ], family = "binomial")
+
+monetary_influence_actress <- glm(best_actress_win ~ log(box_office) + log(budget),
+                                  data = od[od$category == "Best Actress", ], family = "binomial")
+
+film_char_pic <- glm(best_pic_win ~ runtime + total_noms + Action + Drama + Thriller + 
+                   Comedy + Fantasy + Music + Romance + War + Biography + Sport +
+                   Crime + Family + Musical + Comedy + History,
+                   data = od[od$category == "Best Picture", ],
+                   family = "binomial")
+
+film_char_dir <- glm(best_dir_win ~ runtime + total_noms + Action + Drama + Thriller + 
+                   Comedy + Fantasy + Music + Romance + War + Biography + Sport +
+                   Crime + Family + Musical + Comedy + History,
+                   data = od[od$category == "Best Director", ],
+                   family = "binomial")
+
+film_char_actor <- glm(best_actor_win ~ runtime + total_noms + Action + Drama + Thriller + 
+                   Comedy + Fantasy + Music + Romance + War + Biography + Sport +
+                   Crime + Family + Musical + Comedy + Mystery + History,
+                   data = od[od$category == "Best Actor", ],
+                   family = "binomial")
+
+film_char_actress <- glm(best_actress_win ~ runtime + total_noms + Action + Drama + Thriller + 
+                   Comedy + Fantasy + Music + Romance + War + Biography + Sport +
+                   Crime + Family + Musical + Comedy + Mystery + History,
+                   data = od[od$category == "Best Actress", ],
+                   family = "binomial")
+
+
+
+
+full_model_pic <- glm(best_pic_win ~ runtime + log(box_office) + log(budget) + total_noms + 
+                          Action + Drama + Thriller + Comedy + Fantasy + Music + 
+                          Romance + War + Biography + Sport + Crime + Family + 
+                          Musical + Comedy + Mystery + History,
+                      data = od[od$category == "Best Picture", ], family = "binomial")
+
+full_model_dir <- glm(best_dir_win ~ runtime + log(box_office) + log(budget) + total_noms + 
+                          Action + Drama + Thriller + Comedy + Fantasy + Music + 
+                          Romance + War + Biography + Sport + Crime + Family + 
+                          Musical + Comedy + Mystery + History,
+                      data = od[od$category == "Best Director", ], family = "binomial")
+
+full_model_actor <- glm(best_actor_win ~ runtime + log(box_office) + log(budget) + total_noms + 
+                          Action + Drama + Thriller + Comedy + Fantasy + Music + 
+                          Romance + War + Biography + Sport + Crime + Family + 
+                          Musical + Comedy + Mystery + History,
+                        data = od[od$category == "Best Actor", ], family = "binomial")
+
+full_model_actress <- glm(best_actress_win ~ runtime + log(box_office) + log(budget) + total_noms + 
+                          Action + Drama + Thriller + Comedy + Fantasy + Music + 
+                          Romance + War + Biography + Sport + Crime + Family + 
+                          Musical + Comedy + Mystery + History,
+                          data = od[od$category == "Best Actress", ], family = "binomial")
+
+mon_influence_table <- modelsummary(
+  list("Best Picture" = monetary_influence_pic,
+       "Best Director" = monetary_influence_dir,
+       "Best Actor" = monetary_influence_actor,
+       "Best Actress" = monetary_influence_actress),
+  stars = c("*" = .1, "**" = .05, "***" = .01),,
+  statistic = "p.value",
+  fmt = 5,
+  gof_omit = "BIC|Log.Lik",
+  title = "Monetary Influence Only")
+
+film_char_table <- modelsummary(
+  list("Best Picture" = film_char_pic,
+       "Best Director" = film_char_dir,
+       "Best Actor" = film_char_actor,
+       "Best Actress" = film_char_actress),
+  stars = c("*" = .1, "**" = .05, "***" = .01),
+  statistic = "p.value",
+  fmt = 5,
+  gof_omit = "BIC|Log.Lik",
+  title = "Filmmaking Characteristics Only")
+
+full_model_table <- modelsummary(
+  list("Best Picture" = full_model_pic,
+       "Best Director" = full_model_dir,
+       "Best Actor" = full_model_actor,
+       "Best Actress" = full_model_actress),
+  stars = c("*" = .1, "**" = .05, "***" = .01),
+  statistic = "p.value",
+  fmt = 5,
+  gof_omit = "BIC|Log.Lik",
+  title = "Full Model")
+
+mon_influence_table
+film_char_table
+full_model_table
+```
+
+For the monetary influences logistic regression, some interesting patterns emerge. When box office and budget are combined in the same regression, the results differ from the analyses of each variable individually in the earlier logit models. Previously, some budget coefficients were positive, but in the combined regression, budget shows a negative effect across all award categories, while box office remains positive.
+
+In the filmmaking characteristics logistic regression model, several variables stand out. Total nominations are a significant predictor for all four award categories, with greater significance for Best Picture and Best Director than for Best Actor and Best Actress. Runtime is also a significant predictor for all categories except Best Picture, which is notable given that Best Director is often judged similarly and would typically show comparable variable relevance. Various genre variables show significance for some award categories but not others. For instance, the drama, thriller, romance, war, sport, and comedy genres are significant for Best Picture, Best Director, and Best Actress, but not for Best Actor.
+
+Finally, in the model combining monetary influences with filmmaking characteristics, some changes are observed. Runtime becomes significant for Best Picture. Beyond that, coefficients for all variables in the model are adjusted, and the four main predictors—box office, budget, total nominations, and runtime—are all statistically significant at the 1% level, except for runtime, which is significant at the 5% level for the Best Actor category.
+
+# 18. Coefficient plots for monetary influence models.
+
+```{r, mon_infl coef plot, echo= FALSE}
+mon_infl_pic_tidy <- tidy(monetary_influence_pic, conf.int = TRUE) %>%
+  filter(term != "(Intercept)")
+mon_infl_dir_tidy <- tidy(monetary_influence_dir, conf.int = TRUE) %>%
+  filter(term != "(Intercept)")
+mon_infl_actor_tidy <- tidy(monetary_influence_actor, conf.int = TRUE) %>%
+  filter(term != "(Intercept)")
+mon_infl_actress_tidy <- tidy(monetary_influence_actress, conf.int = TRUE) %>%
+  filter(term != "(Intercept)")
+
+mon_infl_pic_coef_plot <- ggplot(mon_infl_pic_tidy,
+       aes(
+         x = estimate,
+         y = reorder(term, estimate)
+       )) +
+  geom_point() +
+  geom_errorbarh(aes(
+    xmin = conf.low,
+    xmax = conf.high,
+    height = 0
+  )) +
+  theme_minimal() + 
+  labs(
+    x = "",
+    y = "",
+    title = "Best Picture") + 
+  theme(plot.title = element_text(hjust = .5))
+
+mon_infl_dir_coef_plot <- ggplot(mon_infl_dir_tidy,
+       aes(
+         x = estimate,
+         y = reorder(term, estimate)
+       )) +
+  geom_point() +
+  geom_errorbarh(aes(
+    xmin = conf.low,
+    xmax = conf.high,
+    height = 0
+  )) +
+  theme_minimal() + 
+  labs(
+    x = "",
+    y = "",
+    title = "Best Director") + 
+  theme(plot.title = element_text(hjust = .5))
+
+mon_infl_actor_coef_plot <- ggplot(mon_infl_actor_tidy,
+       aes(
+         x = estimate,
+         y = reorder(term, estimate)
+       )) +
+  geom_point() +
+  geom_errorbarh(aes(
+    xmin = conf.low,
+    xmax = conf.high,
+    height = 0
+  )) +
+  theme_minimal() + 
+  labs(
+    x = "Coefficient",
+    y = "",
+    title = "Best Actor") + 
+  theme(plot.title = element_text(hjust = .5))
+
+mon_infl_actress_coef_plot <- ggplot(mon_infl_actress_tidy,
+       aes(
+         x = estimate,
+         y = reorder(term, estimate)
+       )) +
+  geom_point() +
+  geom_errorbarh(aes(
+    xmin = conf.low,
+    xmax = conf.high,
+    height = 0
+  )) +
+  theme_minimal() + 
+  labs(
+    x = "Coefficient",
+    y = "",
+    title = "Best Actress") + 
+  theme(plot.title = element_text(hjust = .5))
+
+(mon_infl_pic_coef_plot | mon_infl_dir_coef_plot) / 
+(mon_infl_actor_coef_plot | mon_infl_actress_coef_plot) +
+  plot_annotation(title = "Monetary Influence Coefficient Plots",
+                  theme = theme(plot.title = element_text(hjust = .5)))
+```
+
+The same patterns observed in the previous regressions are evident here. All coefficients are statistically different from zero. Box office retains the same positive coefficient seen in the logit plots, while budget is now negative across all categories, rather than only some, once box office is included in the model.
+
+# 19. Coefficient plots for filmmaking characteristic models.
+
+```{r, film_char coef plot, warning=FALSE}
+film_char_pic_tidy <- tidy(film_char_pic, conf.int = TRUE) %>%
+  filter(term != "(Intercept)") %>%
+  filter(abs(conf.high - conf.low) < 20)
+film_char_dir_tidy <- tidy(film_char_dir, conf.int = TRUE) %>%
+  filter(term != "(Intercept)") %>%
+  filter(abs(conf.high - conf.low) < 20)
+film_char_actor_tidy <- tidy(film_char_actor, conf.int = TRUE) %>%
+  filter(term != "(Intercept)") %>%
+  filter(abs(conf.high - conf.low) < 20)
+film_char_actress_tidy <- tidy(film_char_actress, conf.int = TRUE) %>%
+  filter(term != "(Intercept)") %>%
+  filter(abs(conf.high - conf.low) < 20)
+
+film_char_pic_coef_plot <- ggplot(film_char_pic_tidy,
+       aes(
+         x = estimate,
+         y = reorder(term, estimate)
+       )) +
+  geom_point() +
+  geom_errorbarh(aes(
+    xmin = conf.low,
+    xmax = conf.high,
+    height = 0
+  )) +
+  theme_minimal() + 
+  labs(
+    x = "",
+    y = "",
+    title = "Best Picture") + 
+  theme(plot.title = element_text(hjust = .5))
+
+film_char_dir_coef_plot <- ggplot(film_char_dir_tidy,
+       aes(
+         x = estimate,
+         y = reorder(term, estimate)
+       )) +
+  geom_point() +
+  geom_errorbarh(aes(
+    xmin = conf.low,
+    xmax = conf.high,
+    height = 0
+  )) +
+  theme_minimal(base_size = 10) + 
+  labs(
+    x = "",
+    y = "",
+    title = "Best Director") + 
+  theme(plot.title = element_text(hjust = .5))
+
+film_char_actor_coef_plot <- ggplot(film_char_actor_tidy,
+       aes(
+         x = estimate,
+         y = reorder(term, estimate)
+       )) +
+  geom_point() +
+  geom_errorbarh(aes(
+    xmin = conf.low,
+    xmax = conf.high,
+    height = 0
+  )) +
+  theme_minimal() + 
+  labs(
+    x = "Coefficient",
+    y = "",
+    title = "Best Actor") + 
+  theme(plot.title = element_text(hjust = .5))
+
+film_char_actress_coef_plot <- ggplot(film_char_actress_tidy,
+       aes(
+         x = estimate,
+         y = reorder(term, estimate)
+       )) +
+  geom_point() +
+  geom_errorbarh(aes(
+    xmin = conf.low,
+    xmax = conf.high,
+    height = 0
+  )) +
+  theme_minimal() + 
+  labs(
+    x = "Coefficient",
+    y = "",
+    title = "Best Actress") + 
+  theme(plot.title = element_text(hjust = .5))
+
+(film_char_pic_coef_plot | film_char_dir_coef_plot) / 
+(film_char_actor_coef_plot | film_char_actress_coef_plot) +
+  plot_annotation(title = "Filmmaking Characteristic Influence Coefficient Plots",
+                  theme = theme(plot.title = element_text(hjust = .5)))
+```
+
+Examining the coefficient plot instead of the regression table reveals that genre has minimal impact for actors and actresses pursuing awards, as most confidence intervals for the coefficients barely extend beyond zero, or do not at all, with the exception of action for actors. Directors, however, show stronger associations between genre and win probabilities, with some genres, such as sport and war, clearly exhibiting coefficients well outside the range of zero for Best Director and Best Picture.
+
+# 20. Coefficient plots for full models.
+
+```{r, full model coef plot, warning=FALSE}
+full_model_pic_tidy <- tidy(full_model_pic, conf.int = TRUE) %>%
+  filter(term != "(Intercept)") %>%
+  filter(abs(conf.high - conf.low) < 20)
+full_model_dir_tidy <- tidy(full_model_dir, conf.int = TRUE) %>%
+  filter(term != "(Intercept)") %>%
+  filter(abs(conf.high - conf.low) < 20)
+full_model_actor_tidy <- tidy(full_model_actor, conf.int = TRUE) %>%
+  filter(term != "(Intercept)") %>%
+  filter(abs(conf.high - conf.low) < 20)
+full_model_actress_tidy <- tidy(full_model_actress, conf.int = TRUE) %>%
+  filter(term != "(Intercept)") %>%
+  filter(abs(conf.high - conf.low) < 20)
+
+full_model_pic_coef_plot <- ggplot(full_model_pic_tidy,
+       aes(
+         x = estimate,
+         y = reorder(term, estimate)
+       )) +
+  geom_point() +
+  geom_errorbarh(aes(
+    xmin = conf.low,
+    xmax = conf.high,
+    height = 0
+  )) +
+  theme_minimal() + 
+  labs(
+    x = "",
+    y = "",
+    title = "Best Picture") + 
+  theme(plot.title = element_text(hjust = .5))
+
+full_model_dir_coef_plot <- ggplot(full_model_dir_tidy,
+       aes(
+         x = estimate,
+         y = reorder(term, estimate)
+       )) +
+  geom_point() +
+  geom_errorbarh(aes(
+    xmin = conf.low,
+    xmax = conf.high,
+    height = 0
+  )) +
+  theme_minimal() + 
+  labs(
+    x = "",
+    y = "",
+    title = "Best Director") + 
+  theme(plot.title = element_text(hjust = .5))
+
+full_model_actor_coef_plot <- ggplot(full_model_actor_tidy,
+       aes(
+         x = estimate,
+         y = reorder(term, estimate)
+       )) +
+  geom_point() +
+  geom_errorbarh(aes(
+    xmin = conf.low,
+    xmax = conf.high,
+    height = 0
+  )) +
+  theme_minimal() + 
+  labs(
+    x = "Coefficient",
+    y = "",
+    title = "Best Actor") + 
+  theme(plot.title = element_text(hjust = .5))
+
+full_model_actress_coef_plot <- ggplot(full_model_actress_tidy,
+       aes(
+         x = estimate,
+         y = reorder(term, estimate)
+       )) +
+  geom_point() +
+  geom_errorbarh(aes(
+    xmin = conf.low,
+    xmax = conf.high,
+    height = 0
+  )) +
+  theme_minimal() + 
+  labs(
+    x = "Coefficient",
+    y = "",
+    title = "Best Actress") + 
+  theme(plot.title = element_text(hjust = .5))
+
+(full_model_pic_coef_plot | full_model_dir_coef_plot) / 
+(full_model_actor_coef_plot | full_model_actress_coef_plot) +
+  plot_annotation(title = "Full Model Coefficient Plots",
+                  theme = theme(plot.title = element_text(hjust = .5)))
+```
+
+Finally, examining the coefficient plot for the entire model brings together visually all the patterns observed in the logistic regression table. Actors show few statistically significant genre predictors, but the previously identified major predictors remain significant. Actresses exhibit a similar pattern, with slightly more significant genre predictors than actors. For Best Picture and Best Director, the graphs are quite similar, with minor differences among genre predictors, while all four main predictors remain positive and statistically significant.
+
+# 21. Test our models with prediction accuracy.
+
+```{r, train/test models, warning=FALSE}
+set.seed(10)
+
+pred_od <- od %>%
+  filter(!is.na(budget), !is.na(box_office))
+
+pred_pic_od <- pred_od %>%
+  filter(category == "Best Picture")
+
+pic_indices <- sample(1:nrow(pred_pic_od), size = nrow(pred_pic_od) * .8, replace = FALSE)
+train_pic <- pred_pic_od[pic_indices,]
+test_pic <- pred_pic_od[-pic_indices,]
+
+pred_dir_od <- pred_od %>%
+  filter(category == "Best Director")
+
+dir_indices <- sample(1:nrow(pred_dir_od), size = nrow(pred_dir_od) * .8, replace = FALSE)
+train_dir <- pred_dir_od[dir_indices,]
+test_dir <- pred_dir_od[-dir_indices,]
+
+pred_actor_od <- pred_od %>%
+  filter(category == "Best Actor")
+
+actor_indices <- sample(1:nrow(pred_actor_od), size = nrow(pred_actor_od) * .8, replace = FALSE)
+train_actor <- pred_actor_od[actor_indices,]
+test_actor <- pred_actor_od[-actor_indices,]
+
+pred_actress_od <- pred_od %>%
+  filter(category == "Best Actress")
+
+actress_indices <- sample(1:nrow(pred_actress_od), size = nrow(pred_actress_od) * .8, replace = FALSE)
+train_actress <- pred_actress_od[actress_indices,]
+test_actress <- pred_actress_od[-actress_indices,]
+
+pred_model_pic <- glm(best_pic_win ~ runtime + box_office + budget + total_noms + 
+                          Action + Drama + Thriller + Comedy + Fantasy + Music + 
+                          Romance + War + Biography + Sport + Crime + Family + 
+                          Musical + Comedy + Mystery + History + Horror + sci_fi, data = train_pic)
+
+pred_pic <- predict(pred_model_pic, newdata = test_pic, type = "response")
+roc_pic <- roc(response = test_pic$best_pic_win, predictor = pred_pic)
+optimal_pic_coords <- coords(roc_pic, x = "best", 
+                         best.method = "youden", 
+                         ret = "threshold")
+
+pic_cutoff <- optimal_pic_coords[,1]
+pred_pic <- factor(ifelse(pred_pic > pic_cutoff, 1, 0), levels = c(0, 1))
+actual_pic <- factor(test_pic$best_pic_win, levels = c(0, 1))
+
+cm_pic <- confusionMatrix(pred_pic, actual_pic)
+
+pred_model_dir <- glm(best_dir_win ~ runtime + box_office + budget + total_noms + 
+                          Action + Drama + Thriller + Comedy + Fantasy + Music + 
+                          Romance + War + Biography + Sport + Crime + Family + 
+                          Musical + Comedy + Mystery + History + Horror + sci_fi, data = train_dir)
+
+pred_dir <- predict(pred_model_dir, newdata = test_dir, type = "response")
+roc_dir <- roc(response = test_dir$best_dir_win, predictor = pred_dir)
+optimal_dir_coords <- coords(roc_dir, x = "best", 
+                         best.method = "youden", 
+                         ret = "threshold")
+
+dir_cutoff <- optimal_dir_coords[,1]
+pred_dir <- factor(ifelse(pred_dir < dir_cutoff, 0, 1), levels = c(0, 1))
+actual_dir <- factor(test_dir$best_dir_win, levels = c(0, 1))
+
+cm_dir <- confusionMatrix(pred_dir, actual_dir)
+
+pred_model_actor <- glm(best_actor_win ~ runtime + box_office + budget + total_noms + 
+                          Action + Drama + Thriller + Comedy + Fantasy + Music + 
+                          Romance + War + Biography + Sport + Crime + Family + 
+                          Musical + Comedy + Mystery + History + Horror + sci_fi, data = train_actor)
+
+pred_actor <- predict(pred_model_actor, newdata = test_actor, type = "response")
+roc_actor <- roc(response = test_actor$best_actor_win, predictor = pred_actor)
+optimal_actor_coords <- coords(roc_actor, x = "best", 
+                         best.method = "youden", 
+                         ret = "threshold")
+
+actor_cutoff <- optimal_actor_coords[,1]
+pred_actor <- factor(ifelse(pred_actor < actor_cutoff, 0, 1), levels = c(0, 1))
+actual_actor <- factor(test_actor$best_actor_win, levels = c(0, 1))
+
+cm_actor <- confusionMatrix(pred_actor, actual_actor)
+
+pred_model_actress <- glm(best_actress_win ~ runtime + box_office + budget + total_noms + 
+                          Action + Drama + Thriller + Comedy + Fantasy + Music + 
+                          Romance + War + Biography + Sport + Crime + Family + 
+                          Musical + Comedy + Mystery + History + Horror + sci_fi, data = train_actress)
+
+pred_actress <- predict(pred_model_actress, newdata = test_actress, type = "response")
+roc_actress <- roc(response = test_actress$best_actress_win, predictor = pred_actress)
+optimal_actress_coords <- coords(roc_actress, x = "best", 
+                         best.method = "youden", 
+                         ret = "threshold")
+
+actress_cutoff <- optimal_actress_coords[,1]
+pred_actress <- factor(ifelse(pred_actress < actress_cutoff, 0, 1), levels = c(0, 1))
+actual_actress <- factor(test_actress$best_actress_win, levels = c(0, 1))
+
+cm_actress <- confusionMatrix(pred_actress, actual_actress)
+```
+
+```{r, confusion matrix table}
+extract_cm_summary <- function(cm, name) {
+  tibble::tibble(
+    Outcome = name,
+    Accuracy = cm$overall["Accuracy"],
+    Sensitivity = cm$byClass["Sensitivity"],
+    Specificity = cm$byClass["Specificity"],
+    ConfusionMatrix = paste0(
+      "TP: ", cm$table[2,2], ", ",
+      "FP: ", cm$table[1,2], ", ",
+      "TN: ", cm$table[1,1], ", ",
+      "FN: ", cm$table[2,1]
+    )
+  )
+}
+
+cm_summary <- bind_rows(
+  extract_cm_summary(cm_pic, "Best Picture"),
+  extract_cm_summary(cm_dir, "Best Director"),
+  extract_cm_summary(cm_actor, "Best Actor"),
+  extract_cm_summary(cm_actress, "Best Actress"))
+
+cm_summary
+```
+
+The confusion matrix containing the main results of the predictive model shows moderately promising performance. The Best Picture category has an accuracy of 80.4%, with sensitivity and specificity of 82.9% and 69.1%, respectively. This indicates that 82.9% of true positives are correctly identified, while 69.1% of true negatives are correctly classified. Higher specificity would be desirable, but optimizing for it would reduce the true positive rate. Best Director and Best Actress exhibit relatively similar percentages across all three measures, although Best Actress has a notably low specificity of only 50%. The category with the lowest overall accuracy is Best Actor, with 59.3% accuracy, correctly identifying true positives 48.4% of the time and true negatives 88.4% of the time. While this represents the lowest performance in overall accuracy and true positives, it achieves the highest true negative rate. A person familiar with all nominated films and actors might predict outcomes better than the model, but for blind predictions, the model is likely to perform better.
+
